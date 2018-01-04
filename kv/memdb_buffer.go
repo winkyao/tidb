@@ -16,34 +16,39 @@
 package kv
 
 import (
+	"bytes"
+	"io"
 	"sync/atomic"
 
 	"github.com/juju/errors"
-	"github.com/pingcap/goleveldb/leveldb"
-	"github.com/pingcap/goleveldb/leveldb/comparer"
-	"github.com/pingcap/goleveldb/leveldb/iterator"
-	"github.com/pingcap/goleveldb/leveldb/memdb"
-	"github.com/pingcap/goleveldb/leveldb/util"
-	"github.com/pingcap/tidb/terror"
+	btree "github.com/pingcap/tidb/util/btree"
 )
 
 // memDBBuffer implements the MemBuffer interface.
 type memDbBuffer struct {
-	db              *memdb.DB
+	db              *btree.Tree
+	totalEntrySize  int
 	entrySizeLimit  int
 	bufferLenLimit  uint64
 	bufferSizeLimit int
 }
 
 type memDbIter struct {
-	iter    iterator.Iterator
+	iter    *btree.Enumerator
 	reverse bool
+	key     Key
+	val     []byte
+	valid   bool
+}
+
+func btreeComparer(a, b []byte) int {
+	return bytes.Compare(a, b)
 }
 
 // NewMemDbBuffer creates a new memDbBuffer.
 func NewMemDbBuffer() MemBuffer {
 	return &memDbBuffer{
-		db:              memdb.New(comparer.DefaultComparer, 4*1024),
+		db:              btree.TreeNew(btreeComparer),
 		entrySizeLimit:  TxnEntrySizeLimit,
 		bufferLenLimit:  atomic.LoadUint64(&TxnEntryCountLimit),
 		bufferSizeLimit: TxnTotalSizeLimit,
@@ -52,13 +57,26 @@ func NewMemDbBuffer() MemBuffer {
 
 // Seek creates an Iterator.
 func (m *memDbBuffer) Seek(k Key) (Iterator, error) {
-	var i Iterator
+	var (
+		iter *btree.Enumerator
+		err  error
+	)
 	if k == nil {
-		i = &memDbIter{iter: m.db.NewIterator(&util.Range{}), reverse: false}
+		iter, err = m.db.SeekFirst()
 	} else {
-		i = &memDbIter{iter: m.db.NewIterator(&util.Range{Start: []byte(k)}), reverse: false}
+		iter, _ = m.db.Seek(k)
 	}
-	err := i.Next()
+
+	i := &memDbIter{iter: iter, reverse: false, valid: true}
+	if err != nil {
+		if err == io.EOF {
+			// no a real error
+			i.valid = false
+		} else {
+			return nil, errors.Trace(err)
+		}
+	}
+	err = i.Next()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -66,20 +84,41 @@ func (m *memDbBuffer) Seek(k Key) (Iterator, error) {
 }
 
 func (m *memDbBuffer) SeekReverse(k Key) (Iterator, error) {
-	var i *memDbIter
+	var (
+		iter *btree.Enumerator
+		err  error
+	)
 	if k == nil {
-		i = &memDbIter{iter: m.db.NewIterator(&util.Range{}), reverse: true}
+		iter, err = m.db.SeekLast()
 	} else {
-		i = &memDbIter{iter: m.db.NewIterator(&util.Range{Limit: []byte(k)}), reverse: true}
+		lastKey, _ := m.db.Last()
+		if btreeComparer(k, lastKey) > 0 {
+			iter, err = m.db.SeekLast()
+		} else {
+			iter, _ = m.db.Seek(k)
+			_, _, err = iter.Prev()
+		}
 	}
-	i.iter.Last()
+	i := &memDbIter{iter: iter, reverse: true, valid: true}
+	if err != nil {
+		if err == io.EOF {
+			// no a real error
+			i.valid = false
+		} else {
+			return nil, errors.Trace(err)
+		}
+	}
+	err = i.Next()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	return i, nil
 }
 
 // Get returns the value associated with key.
 func (m *memDbBuffer) Get(k Key) ([]byte, error) {
-	v, err := m.db.Get(k)
-	if terror.ErrorEqual(err, leveldb.ErrNotFound) {
+	v, ok := m.db.Get(k)
+	if !ok {
 		return nil, ErrNotExist
 	}
 	return v, nil
@@ -90,29 +129,32 @@ func (m *memDbBuffer) Set(k Key, v []byte) error {
 	if len(v) == 0 {
 		return errors.Trace(ErrCannotSetNilValue)
 	}
-	if len(k)+len(v) > m.entrySizeLimit {
+	entrySize := len(k) + len(v)
+	if entrySize > m.entrySizeLimit {
 		return ErrEntryTooLarge.Gen("entry too large, size: %d", len(k)+len(v))
 	}
 
-	err := m.db.Put(k, v)
+	m.db.Set(k, v)
+	m.totalEntrySize += entrySize
 	if m.Size() > m.bufferSizeLimit {
 		return ErrTxnTooLarge.Gen("transaction too large, size:%d", m.Size())
 	}
 	if m.Len() > int(m.bufferLenLimit) {
 		return ErrTxnTooLarge.Gen("transaction too large, len:%d", m.Len())
 	}
-	return errors.Trace(err)
+
+	return nil
 }
 
 // Delete removes the entry from buffer with provided key.
 func (m *memDbBuffer) Delete(k Key) error {
-	err := m.db.Put(k, nil)
-	return errors.Trace(err)
+	m.db.Set(k, nil)
+	return nil
 }
 
 // Size returns sum of keys and values length.
 func (m *memDbBuffer) Size() int {
-	return m.db.Size()
+	return m.totalEntrySize
 }
 
 // Len returns the number of entries in the DB.
@@ -122,32 +164,43 @@ func (m *memDbBuffer) Len() int {
 
 // Next implements the Iterator Next.
 func (i *memDbIter) Next() error {
-	if i.reverse {
-		i.iter.Prev()
-	} else {
-		i.iter.Next()
+	if !i.Valid() {
+		return nil
 	}
-	return nil
+
+	var err error
+	if i.reverse {
+		i.key, i.val, err = i.iter.Prev()
+	} else {
+		i.key, i.val, err = i.iter.Next()
+	}
+	if err == io.EOF {
+		i.valid = false
+		return nil
+	}
+	return errors.Trace(err)
 }
 
 // Valid implements the Iterator Valid.
 func (i *memDbIter) Valid() bool {
-	return i.iter.Valid()
+	return i.valid && i.iter != nil
 }
 
 // Key implements the Iterator Key.
 func (i *memDbIter) Key() Key {
-	return i.iter.Key()
+	return i.key
 }
 
 // Value implements the Iterator Value.
 func (i *memDbIter) Value() []byte {
-	return i.iter.Value()
+	return i.val
 }
 
 // Close Implements the Iterator Close.
 func (i *memDbIter) Close() {
-	i.iter.Release()
+	if i.iter != nil {
+		i.iter.Close()
+	}
 }
 
 // WalkMemBuffer iterates all buffered kv pairs in memBuf
