@@ -32,7 +32,6 @@ type memDbBuffer struct {
 	entrySizeLimit  int
 	bufferLenLimit  uint64
 	bufferSizeLimit int
-	mu              sync.Mutex
 }
 
 type memDbIter struct {
@@ -59,8 +58,6 @@ func NewMemDbBuffer(cap int) MemBuffer {
 
 // Seek creates an Iterator.
 func (m *memDbBuffer) Seek(k Key) (Iterator, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var (
 		iter *btree.Enumerator
 		err  error
@@ -92,8 +89,6 @@ func (m *memDbBuffer) SetCap(cap int) {
 }
 
 func (m *memDbBuffer) SeekReverse(k Key) (Iterator, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var (
 		iter *btree.Enumerator
 		err  error
@@ -127,8 +122,6 @@ func (m *memDbBuffer) SeekReverse(k Key) (Iterator, error) {
 
 // Get returns the value associated with key.
 func (m *memDbBuffer) Get(k Key) ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	v, ok := m.db.Get(k)
 	if !ok {
 		return nil, ErrNotExist
@@ -138,8 +131,6 @@ func (m *memDbBuffer) Get(k Key) ([]byte, error) {
 
 // Set associates key with value.
 func (m *memDbBuffer) Set(k Key, v []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if len(v) == 0 {
 		return errors.Trace(ErrCannotSetNilValue)
 	}
@@ -162,8 +153,6 @@ func (m *memDbBuffer) Set(k Key, v []byte) error {
 
 // Delete removes the entry from buffer with provided key.
 func (m *memDbBuffer) Delete(k Key) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.db.Set(k, nil)
 	return nil
 }
