@@ -18,7 +18,6 @@ package kv
 import (
 	"bytes"
 	"io"
-	"sync"
 	"sync/atomic"
 
 	"github.com/juju/errors"
