@@ -202,11 +202,6 @@ func (t *Table) WritableCols() []*table.Column {
 			continue
 		}
 
-		if col.State != model.StatePublic {
-			log.Infof("col.name:%v state:%v nonPulic", col.Name.O, col.State)
-			continue
-		}
-
 		if col.Offset >= len(writableColumns) {
 			log.Infof("col.name:%v col.Offset:%v out of range, length of columns:%v", col.Name.O, col.Offset, len(writableColumns))
 			continue
