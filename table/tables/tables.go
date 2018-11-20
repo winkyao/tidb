@@ -178,6 +178,10 @@ func (t *Table) Cols() []*table.Column {
 		if col.State != model.StatePublic {
 			continue
 		}
+		if col.Offset >= len(publicColumns) {
+			log.Infof("col.name:%v col.Offset:%v out of range, length of columns:%v", col.Name.O, col.Offset, len(publicColumns))
+			continue
+		}
 		publicColumns[col.Offset] = col
 		if maxOffset < col.Offset {
 			maxOffset = col.Offset
@@ -205,6 +209,7 @@ func (t *Table) WritableCols() []*table.Column {
 
 		if col.Offset >= len(writableColumns) {
 			log.Infof("col.name:%v col.Offset:%v out of range, length of columns:%v", col.Name.O, col.Offset, len(writableColumns))
+			continue
 		}
 		writableColumns[col.Offset] = col
 		if maxOffset < col.Offset {
